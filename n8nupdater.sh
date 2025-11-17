@@ -95,6 +95,33 @@ cleanup() {
 # Set up signal handlers
 trap cleanup EXIT INT TERM
 
+# Color codes for user-friendly output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Check if output is a terminal (for colors)
+if [ -t 1 ]; then
+    USE_COLORS=true
+else
+    USE_COLORS=false
+fi
+
+# Helper function to print colored output
+print_color() {
+    local color=$1
+    shift
+    if [ "$USE_COLORS" = true ]; then
+        echo -e "${color}$@${NC}"
+    else
+        echo "$@"
+    fi
+}
+
 # Logging function with fallback to stderr if log file fails
 log() {
     message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
@@ -108,6 +135,7 @@ log_error() {
     if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
         echo "$message" >&2
     fi
+    print_color "$RED" "❌ ERROR: $1" >&2
 }
 
 log_info() {
@@ -115,6 +143,7 @@ log_info() {
     if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
         echo "$message" >&2
     fi
+    print_color "$BLUE" "ℹ️  INFO: $1"
 }
 
 log_warning() {
@@ -122,6 +151,31 @@ log_warning() {
     if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
         echo "$message" >&2
     fi
+    print_color "$YELLOW" "⚠️  WARNING: $1"
+}
+
+log_success() {
+    message="[$(date '+%Y-%m-%d %H:%M:%S')] SUCCESS: $1"
+    if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
+        echo "$message" >&2
+    fi
+    print_color "$GREEN" "✅ SUCCESS: $1"
+}
+
+log_step() {
+    message="[$(date '+%Y-%m-%d %H:%M:%S')] STEP: $1"
+    if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
+        echo "$message" >&2
+    fi
+    print_color "$CYAN" "▶️  $1"
+}
+
+log_skip() {
+    message="[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: $1"
+    if ! echo "$message" >> "$LOG_FILE" 2>/dev/null; then
+        echo "$message" >&2
+    fi
+    print_color "$YELLOW" "⏭️  SKIPPED: $1"
 }
 
 # Validate and normalize paths
@@ -230,9 +284,15 @@ for cmd in curl tar gzip; do
     fi
 done
 
-log_info "Starting n8n update process..."
+echo ""
+print_color "$BOLD" "═══════════════════════════════════════════════════════════"
+print_color "$BOLD" "  n8n Updater - Starting Update Process"
+print_color "$BOLD" "═══════════════════════════════════════════════════════════"
+echo ""
 log_info "Installation directory: ${INSTALL_DIR}"
 log_info "Backup directory: ${BACKUP_DIR}"
+log_info "Log file: ${LOG_FILE}"
+echo ""
 
 # Auto-detect installation directory if default doesn't exist
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -287,12 +347,14 @@ if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ] && [ ! -f "${INSTALL_DIR}/docker
 fi
 
 # Validate docker-compose file syntax
-log_info "Validating docker-compose configuration..."
+log_step "Validating docker-compose configuration..."
 if ! $DOCKER_COMPOSE_CMD -f "${INSTALL_DIR}/docker-compose.yml" config >/dev/null 2>&1 && \
    ! $DOCKER_COMPOSE_CMD -f "${INSTALL_DIR}/docker-compose.yaml" config >/dev/null 2>&1; then
     log_error "docker-compose configuration file has syntax errors"
     exit 1
 fi
+log_success "Docker Compose configuration is valid"
+echo ""
 
 # Check disk space for backup directory
 check_disk_space() {
@@ -311,7 +373,7 @@ check_disk_space() {
 
 # Backup function
 backup_n8n_data() {
-    log_info "Creating backup of n8n data..."
+    log_step "Creating backup of n8n data..."
     
     # Check disk space
     if ! check_disk_space "$BACKUP_DIR" 100; then
@@ -319,13 +381,13 @@ backup_n8n_data() {
     fi
     
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    BACKUP_PATH="${BACKUP_DIR}/n8n-backup-${TIMESTAMP}"
+    local backup_path="${BACKUP_DIR}/n8n-backup-${TIMESTAMP}"
     
-    log_info "Backup location: ${BACKUP_PATH}"
+    log_info "Backup location: ${backup_path}"
     
     # Create backup directory
-    if ! mkdir -p "${BACKUP_PATH}"; then
-        log_error "Failed to create backup directory: ${BACKUP_PATH}"
+    if ! mkdir -p "${backup_path}"; then
+        log_error "Failed to create backup directory: ${backup_path}"
         return 1
     fi
     
@@ -361,12 +423,12 @@ backup_n8n_data() {
             if timeout 30 curl -sf --max-time 30 \
                 -H "X-N8N-API-KEY: ${API_KEY}" \
                 "http://${N8N_HOST}:${N8N_PORT}/api/v1/workflows" \
-                > "${BACKUP_PATH}/workflows.json" 2>/dev/null; then
+                > "${backup_path}/workflows.json" 2>/dev/null; then
                 # Validate JSON
                 if command -v jq >/dev/null 2>&1; then
-                    if ! jq empty "${BACKUP_PATH}/workflows.json" 2>/dev/null; then
+                    if ! jq empty "${backup_path}/workflows.json" 2>/dev/null; then
                         log_warning "API returned invalid JSON, removing file"
-                        rm -f "${BACKUP_PATH}/workflows.json"
+                        rm -f "${backup_path}/workflows.json"
                     else
                         log_info "Workflows exported successfully via API"
                     fi
@@ -392,11 +454,11 @@ backup_n8n_data() {
         tr ' ' '\n' | grep -v '^$' | sort -u | while read -r vol; do
             [ -z "$vol" ] && continue
             if [ -d "$vol" ] && [ -r "$vol" ]; then
-                VOLUME_NAME=$(basename "$vol")
-                VOLUME_DIR=$(dirname "$vol")
-                log_info "Backing up volume: ${VOLUME_NAME}"
-                # Use proper quoting and handle paths with spaces
-                if tar czf "${BACKUP_PATH}/volume-${VOLUME_NAME}.tar.gz" -C "$VOLUME_DIR" "$VOLUME_NAME" 2>/dev/null; then
+            VOLUME_NAME=$(basename "$vol")
+            VOLUME_DIR=$(dirname "$vol")
+            log_info "Backing up volume: ${VOLUME_NAME}"
+            # Use proper quoting and handle paths with spaces
+            if tar czf "${backup_path}/volume-${VOLUME_NAME}.tar.gz" -C "$VOLUME_DIR" "$VOLUME_NAME" 2>/dev/null; then
                     VOLUME_COUNT=$((VOLUME_COUNT + 1))
                 else
                     log_warning "Failed to backup volume: ${VOLUME_NAME}"
@@ -413,7 +475,7 @@ backup_n8n_data() {
     [ -f "${INSTALL_DIR}/.env" ] && CONFIG_FILES+=(".env")
     
     if [ ${#CONFIG_FILES[@]} -gt 0 ]; then
-        if ! tar czf "${BACKUP_PATH}/config.tar.gz" -C "${INSTALL_DIR}" "${CONFIG_FILES[@]}" 2>/dev/null; then
+        if ! tar czf "${backup_path}/config.tar.gz" -C "${INSTALL_DIR}" "${CONFIG_FILES[@]}" 2>/dev/null; then
             log_warning "Failed to backup configuration files"
         fi
     fi
@@ -426,7 +488,7 @@ backup_n8n_data() {
             DB_NAME=$(basename "$db")
             DB_DIR=$(dirname "$db")
             log_info "Backing up database: ${DB_NAME}"
-            if tar czf "${BACKUP_PATH}/database-${DB_NAME}.tar.gz" -C "$DB_DIR" "$DB_NAME" 2>/dev/null; then
+            if tar czf "${backup_path}/database-${DB_NAME}.tar.gz" -C "$DB_DIR" "$DB_NAME" 2>/dev/null; then
                 DB_COUNT=$((DB_COUNT + 1))
             else
                 log_warning "Failed to backup database: ${DB_NAME}"
@@ -435,38 +497,48 @@ backup_n8n_data() {
     done
     
     # Create backup info file
-    cat > "${BACKUP_PATH}/backup-info.txt" << EOF
+    cat > "${backup_path}/backup-info.txt" << EOF
 n8n Backup Information
 ======================
 Backup Date: $(date)
 Installation Directory: ${INSTALL_DIR}
 Container Name: ${CONTAINER_NAME}
-Backup Location: ${BACKUP_PATH}
+Backup Location: ${backup_path}
 
 Contents:
-$(ls -lh "${BACKUP_PATH}" 2>/dev/null || echo 'No files found')
+$(ls -lh "${backup_path}" 2>/dev/null || echo 'No files found')
 EOF
     
-    BACKUP_SIZE=$(du -sh "${BACKUP_PATH}" 2>/dev/null | cut -f1 || echo 'unknown')
-    log_info "Backup completed: ${BACKUP_PATH} (Size: ${BACKUP_SIZE})"
+    BACKUP_SIZE=$(du -sh "${backup_path}" 2>/dev/null | cut -f1 || echo 'unknown')
     
     # Verify backup was created
-    if [ ! -d "$BACKUP_PATH" ] || [ -z "$(ls -A "$BACKUP_PATH" 2>/dev/null)" ]; then
+    if [ ! -d "$backup_path" ] || [ -z "$(ls -A "$backup_path" 2>/dev/null)" ]; then
         log_error "Backup directory is empty or was not created properly"
         return 1
     fi
+    
+    # Set global variable for summary
+    BACKUP_PATH="$backup_path"
+    
+    log_success "Backup completed successfully"
+    log_info "  Location: ${backup_path}"
+    log_info "  Size: ${BACKUP_SIZE}"
     
     return 0
 }
 
 # Perform backup if not skipped
+BACKUP_CREATED=false
+BACKUP_PATH=""
 if [ "$SKIP_BACKUP" != "true" ]; then
-    if ! backup_n8n_data; then
+    if backup_n8n_data; then
+        BACKUP_CREATED=true
+    else
         log_error "Backup failed, but continuing with update..."
     fi
     echo ""
 else
-    log_warning "Skipping backup (--skip-backup flag used)"
+    log_skip "Backup step (--skip-backup flag used)"
     echo ""
 fi
 
@@ -477,45 +549,91 @@ if ! cd "${INSTALL_DIR}"; then
 fi
 
 # Step 1: Pull latest Docker images
-log_info "Step 1: Pulling latest Docker images..."
-if ! timeout "$TIMEOUT" $DOCKER_COMPOSE_CMD pull --quiet; then
+log_step "Step 1/4: Pulling latest Docker images..."
+if timeout "$TIMEOUT" $DOCKER_COMPOSE_CMD pull --quiet; then
+    log_success "Docker images pulled successfully"
+else
     log_error "Failed to pull Docker images!"
     exit 1
 fi
+echo ""
 
 # Step 2: Stop and remove current containers
-log_info "Step 2: Stopping and removing current containers..."
+log_step "Step 2/4: Stopping and removing current containers..."
 # Use --remove-orphans to clean up any orphaned containers
-if ! $DOCKER_COMPOSE_CMD down --remove-orphans; then
+if $DOCKER_COMPOSE_CMD down --remove-orphans; then
+    log_success "Containers stopped and removed successfully"
+else
     log_warning "Some containers may not have stopped cleanly, continuing..."
 fi
+echo ""
 
 # Step 3: Start containers with new images
-log_info "Step 3: Starting containers with new images..."
-if ! $DOCKER_COMPOSE_CMD up -d; then
+log_step "Step 3/4: Starting containers with new images..."
+if $DOCKER_COMPOSE_CMD up -d; then
+    log_success "Containers started successfully"
+else
     log_error "Failed to start containers!"
     exit 1
 fi
+echo ""
 
 # Step 4: Verify containers are running
-log_info "Step 4: Verifying containers are running..."
+log_step "Step 4/4: Verifying containers are running..."
 sleep 5  # Give containers time to start
 
+# Count failed containers and clean the output
 FAILED_CONTAINERS=$($DOCKER_COMPOSE_CMD ps --format json 2>/dev/null | \
-    grep -c '"State":"exited"' || echo "0")
+    grep -c '"State":"exited"' 2>/dev/null || echo "0")
+# Remove any whitespace/newlines and ensure it's a number
+FAILED_CONTAINERS=$(echo "$FAILED_CONTAINERS" | tr -d '[:space:]')
+# Default to 0 if empty or not a number
+if [ -z "$FAILED_CONTAINERS" ] || ! [[ "$FAILED_CONTAINERS" =~ ^[0-9]+$ ]]; then
+    FAILED_CONTAINERS=0
+fi
 
 if [ "$FAILED_CONTAINERS" -gt 0 ]; then
     log_warning "Some containers may have exited. Checking status..."
     $DOCKER_COMPOSE_CMD ps
     log_warning "Please check container logs for issues"
+    CONTAINER_STATUS="⚠️  Some containers may have issues"
 else
-    log_info "All containers appear to be running"
+    log_success "All containers are running"
+    CONTAINER_STATUS="✅ All containers running"
+fi
+echo ""
+
+# Summary
+print_color "$BOLD" "═══════════════════════════════════════════════════════════"
+print_color "$BOLD" "  Update Summary"
+print_color "$BOLD" "═══════════════════════════════════════════════════════════"
+echo ""
+
+if [ "$SKIP_BACKUP" = "true" ]; then
+    print_color "$YELLOW" "  Backup: ⏭️  Skipped (--skip-backup flag used)"
+else
+    if [ "$BACKUP_CREATED" = true ]; then
+        print_color "$GREEN" "  Backup: ✅ Created successfully"
+        if [ -n "$BACKUP_PATH" ]; then
+            BACKUP_SIZE=$(du -sh "$BACKUP_PATH" 2>/dev/null | cut -f1 || echo 'unknown')
+            echo "    Location: $BACKUP_PATH"
+            echo "    Size: $BACKUP_SIZE"
+        fi
+    else
+        print_color "$RED" "  Backup: ❌ Failed (but update continued)"
+    fi
 fi
 
-# Success message
 echo ""
-log_info "Update process completed successfully!"
+print_color "$GREEN" "  Docker Images: ✅ Pulled successfully"
+print_color "$GREEN" "  Containers: ✅ Stopped and removed"
+print_color "$GREEN" "  Containers: ✅ Started with new images"
+echo "  Container Status: $CONTAINER_STATUS"
+echo ""
+print_color "$GREEN" "✅ Update process completed successfully!"
+echo ""
 log_info "Please verify the version number in your n8n web UI"
 log_info "(check the footer or About section) to confirm the update."
+echo ""
 
 exit 0
